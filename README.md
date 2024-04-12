@@ -12,6 +12,8 @@ AWS Remote Access Tool (aws_rat) is a bash script designed to facilitate secure 
 - Bash environment
 - AWS CLI installed and configured with a profile defined in your `~/.aws/credentials` file.
 - AWS SSM Session Manager Plugin for AWS CLI
+  - Debian/Ubuntu/RHEL/AWSLinux/Windows/MacOS [official guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+  - Arch: Install the `aws-session-manager-plugin` package [from the AUR](https://aur.archlinux.org/packages/aws-session-manager-plugin). You can use an AUR helper like [yay](https://github.com/Jguer/yay) or [paru](https://github.com/Morganamilo/paru) for this purpose.
 - jq (Command-line JSON processor)
 
 ## Installation
