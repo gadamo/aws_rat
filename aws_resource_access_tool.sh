@@ -4,6 +4,43 @@ bold='\033[1m'
 underline='\033[4m'
 normal='\033[0m'
 
+check_prerequisites() {
+    # Check Bash version (Bash 4.0+)
+    if [[ "${BASH_VERSION:0:1}" -lt 4 ]]; then
+        echo "This script requires Bash version 4.0 or higher. You are using Bash $BASH_VERSION."
+        return 1
+    fi
+
+    # Check for AWS CLI installation
+    if ! command -v aws >/dev/null 2>&1; then
+        echo "AWS CLI is not installed. Please install it and configure your credentials."
+        return 1
+    fi
+
+    # Check for AWS CLI credentials configuration
+    if [[ ! -f ~/.aws/credentials ]] && [[ -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" ]]; then
+        echo "AWS credentials are not properly set. Please configure them in ~/.aws/credentials or set the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables."
+        return 1
+    fi
+
+    # Check for AWS SSM Session Manager Plugin installation
+    if ! command -v session-manager-plugin >/dev/null 2>&1; then
+        echo "AWS SSM Session Manager Plugin is not installed. Please install it to continue."
+        return 1
+    fi
+
+    # Check for jq installation
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "jq is not installed. Please install jq to process JSON data."
+        return 1
+    fi
+
+    #echo "All prerequisites are met. You are good to go!"
+    return 0
+}
+
+# Execute the check
+check_prerequisites || exit 1
 
 # Check for AWS profile and default region
 if [[ -n $AWS_PROFILE && -n $AWS_DEFAULT_REGION ]]; then
