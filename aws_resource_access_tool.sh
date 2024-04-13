@@ -147,16 +147,16 @@ function fetch_and_select_ec2_instance {
     unset IFS
 }
 
-# Function to check if a specific port is available
-is_port_available() {
+# Function to check if a specific port is open
+is_port_open() {
     local port=$1
 
-    # Attempt to write to the port; if it fails, the port is available
+    # Attempt to write to the port; if it fails, the port is not open
     (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1
     if [ $? -ne 0 ]; then
-        return 0  # 0 means true in shell scripts, port is available
+        return 1  # 1 means false in shell scripts, port is not open
     else
-        return 1  # 1 means false in shell scripts, port is not available
+        return 0  # 0 means true in shell scripts, port is open
     fi
 }
 
@@ -168,7 +168,7 @@ get_available_port() {
         port=$((RANDOM % 64510 + 1025))
 
         # Check if the port is available
-        if is_port_available $port; then
+        if ! is_port_open $port; then
             echo $port
             break
         fi
@@ -198,13 +198,13 @@ setup_port_forwarding_ssh() {
     target_instance=$GLOBAL_SELECTED_INSTANCE
 
     if [ -n "$target_instance" ]; then
-l       local_port=$(get_available_port)
+        local_port=$(get_available_port)
         echo "Setting up port forwarding on port $local_port and initiating SSH session to EC2 instance: $target_instance"
         aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSession --parameters "{\"portNumber\":[\"22\"],\"localPortNumber\":[\"$local_port\"]}" &
         # Save the background process PID
         SSM_PID=$!
         # Loop until the port is available
-        while ! is_port_available $local_port; do
+        while ! is_port_open $local_port; do
             echo "Waiting for port $local_port to become available..."
             sleep 1
         done
@@ -296,7 +296,7 @@ setup_port_forwarding_alb() {
     SSM_PID=$!
 
     # Loop until the port is available
-    while ! is_port_available $local_port; do
+    while ! is_port_open $local_port; do
         echo "Waiting for port $local_port to become available..."
         sleep 1
     done
@@ -433,7 +433,7 @@ setup_port_forwarding_rds() {
     SSM_PID=$!
 
     # Loop until the port is available
-    while ! is_port_available $local_port; do
+    while ! is_port_open $local_port; do
         echo "Waiting for port $local_port to become available..."
         sleep 1
     done
