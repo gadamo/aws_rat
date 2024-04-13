@@ -216,6 +216,7 @@ setup_port_forwarding_ssh() {
         # Start the SSH session
         ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $local_port ec2-user@localhost
         # SSH session has ended, now kill the SSM port forwarding session
+        SSM_PID="$! $(pgrep -P $!)"
         kill $SSM_PID
         echo "SSM port forwarding session terminated."
     else
@@ -305,6 +306,7 @@ setup_port_forwarding_alb() {
     echo "Press enter to exit"; read
 
     # User session has ended, now kill the SSM port forwarding session
+    SSM_PID="$! $(pgrep -P $!)"
     kill $SSM_PID
     echo "SSM port forwarding session terminated."
     show_menu
@@ -442,6 +444,7 @@ setup_port_forwarding_rds() {
     echo "Press enter to exit"; read
 
     # User session has ended, now kill the SSM port forwarding session
+    SSM_PID="$! $(pgrep -P $!)"
     kill $SSM_PID
     echo "SSM port forwarding session terminated."
     show_menu
