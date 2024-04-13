@@ -35,7 +35,6 @@ check_prerequisites() {
         return 1
     fi
 
-    #echo "All prerequisites are met. You are good to go!"
     return 0
 }
 
@@ -116,36 +115,71 @@ show_menu() {
     esac
 }
 
-# Functionality 1
-connect_to_ec2() {
+# Define a (common) function to fetch EC2 instances and select one in a global variable
+GLOBAL_SELECTED_INSTANCE=""
+function fetch_and_select_ec2_instance {
+    local back_function=${1:-"show_menu"}  # Default function to call when going back
+    GLOBAL_SELECTED_INSTANCE=""
+
     echo "Fetching EC2 instances..."
     EC2_INSTANCES=$(aws ec2 describe-instances --query "Reservations[*].Instances[*].[InstanceId, Tags[?Key=='Name'].Value | [0]]" --output text)
     if [ -z "$EC2_INSTANCES" ]; then
         echo "No EC2 instances found."
-        show_menu
+        $back_function
         return
     fi
 
     echo "Available EC2 instances:"
     IFS=$'\n'
-    select_option=1
-    options=()
-    for instance in $EC2_INSTANCES; do
-        echo "$select_option) $instance"
-        options+=("$instance")
-        select_option=$((select_option + 1))
+    select target_instance in $EC2_INSTANCES "Go back"; do
+        if [[ -n $target_instance ]]; then
+            if [ "$target_instance" == "Go back" ]; then
+                $back_function
+                break
+            fi
+            GLOBAL_SELECTED_INSTANCE=$(awk '{print $1}' <<< "$target_instance")
+            echo "Selected EC2 instance: $GLOBAL_SELECTED_INSTANCE"
+            break
+        else
+            echo "Invalid selection, please try again."
+        fi
     done
-    echo "$select_option) Go back"
-    options+=("Go back")
     unset IFS
-    read -p "Enter the number of the EC2 instance to connect to, or $select_option to go back: " instance_number
+}
 
-    if [ "$instance_number" -eq "$select_option" ]; then
-        show_menu
-        return
+# Function to check if a specific port is available
+is_port_available() {
+    local port=$1
+
+    # Attempt to write to the port; if it fails, the port is available
+    (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        return 0  # 0 means true in shell scripts, port is available
+    else
+        return 1  # 1 means false in shell scripts, port is not available
     fi
+}
 
-    target_instance=$(sed -n "${instance_number}p" <<< "$EC2_INSTANCES" | awk '{print $1}')
+# Function to generate a random available port number greater than 1025
+get_available_port() {
+    local port
+    while :; do
+        # Generate random port number between 1025 and 65535
+        port=$((RANDOM % 64510 + 1025))
+
+        # Check if the port is available
+        if is_port_available $port; then
+            echo $port
+            break
+        fi
+    done
+}
+
+# Functionality 1
+connect_to_ec2() {
+    fetch_and_select_ec2_instance "show_menu"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
 
     if [ -n "$target_instance" ]; then
         echo "Starting SSM session to EC2 instance: $target_instance"
@@ -157,53 +191,30 @@ connect_to_ec2() {
     show_menu
 }
 
-
 # Functionality 2
 setup_port_forwarding_ssh() {
-    echo "Fetching EC2 instances..."
-    EC2_INSTANCES=$(aws ec2 describe-instances --query "Reservations[*].Instances[*].[InstanceId, Tags[?Key=='Name'].Value | [0]]" --output text)
-    if [ -z "$EC2_INSTANCES" ]; then
-        echo "No EC2 instances found."
-        show_menu
-        return
-    fi
-
-    echo "Available EC2 instances for SSH connection:"
-    IFS=$'\n'
-    select_option=1
-    options=()
-    for instance in $EC2_INSTANCES; do
-        echo "$select_option) $instance"
-        options+=("$instance")
-        select_option=$((select_option + 1))
-    done
-    echo "$select_option) Go back"
-    options+=("Go back")
-    unset IFS
-    read -p "Enter the number of the EC2 instance to connect to, or $select_option to go back: " instance_number
-
-    if [ "$instance_number" -eq "$select_option" ]; then
-        show_menu
-        return
-    fi
-    target_instance=$(sed -n "${instance_number}p" <<< "$EC2_INSTANCES" | awk '{print $1}')
+    fetch_and_select_ec2_instance "show_menu"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
 
     if [ -n "$target_instance" ]; then
-        # Generate a random port number > 1025 - $RANDOM is distributed between 0 and 32767
-        local_port=$((RANDOM + 1025))
+l       local_port=$(get_available_port)
         echo "Setting up port forwarding on port $local_port and initiating SSH session to EC2 instance: $target_instance"
         aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSession --parameters "{\"portNumber\":[\"22\"],\"localPortNumber\":[\"$local_port\"]}" &
         # Save the background process PID
         SSM_PID=$!
-        # Wait for the port to be ready
-        while ! nc -z localhost $local_port; do echo "Waiting for tunnel setup to complete..."; sleep 1; done
+        # Loop until the port is available
+        while ! is_port_available $local_port; do
+            echo "Waiting for port $local_port to become available..."
+            sleep 1
+        done
         # Display instructions
         echo -e "${bold}Tunnel ready:${normal} You can now access $target_instance SSH port on ${underline}${bold}localhost:${local_port}${normal}"
         echo -e "e.g.: ${underline}${bold}sftp -P $local_port ec2-user@localhost${normal}"
         echo -e "e.g.: ${underline}${bold}scp  -P $local_port ec2-user@localhost:/etc/shells /tmp/test${normal}"
         echo -e "e.g.: ${underline}${bold}ssh -p $local_port ec2-user@localhost${normal}"
         # Start the SSH session
-        ssh -p $local_port ec2-user@localhost
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $local_port ec2-user@localhost
         # SSH session has ended, now kill the SSM port forwarding session
         kill $SSM_PID
         echo "SSM port forwarding session terminated."
@@ -272,29 +283,11 @@ setup_port_forwarding_alb() {
         fi
     done
 
-    echo "Fetching EC2 instances..."
-    EC2_INSTANCES=$(aws ec2 describe-instances --query "Reservations[*].Instances[*].[InstanceId, Tags[?Key=='Name'].Value | [0]]" --output text)
-    if [ -z "$EC2_INSTANCES" ]; then
-        echo "No EC2 instances found."
-        show_menu
-        return
-    fi
+    fetch_and_select_ec2_instance "setup_port_forwarding_alb"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
 
-    echo "Available EC2 instances for port forwarding:"
-    IFS=$'\n'
-    select_option=1
-    for instance in $EC2_INSTANCES; do
-        echo "$select_option) $instance"
-        select_option=$((select_option + 1))
-    done
-    unset IFS
-
-    read -p "Enter the number of the EC2 instance to connect to via SSH: " instance_number
-    #target_instance=$(echo "$EC2_INSTANCES" | sed -n "${instance_number}p" | awk '{print $1}')
-    target_instance=$(sed -n "${instance_number}p" <<< "$EC2_INSTANCES" | awk '{print $1}')
-
-    # Generate a random port number > 1025 - $RANDOM is distributed between 0 and 32767
-    local_port=$((RANDOM + 1025))
+    local_port=$(get_available_port)
 
     echo "Setting up port forwarding to $alb_dnsname:$port - via $target_instance"
     aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${port}'"],"localPortNumber":["'$local_port'"],"host":["'${alb_dnsname}'"]}' &
@@ -302,8 +295,11 @@ setup_port_forwarding_alb() {
     # Save the background process PID
     SSM_PID=$!
 
-    # Wait for the port to be ready
-    while ! nc -z localhost $local_port; do sleep 1; done
+    # Loop until the port is available
+    while ! is_port_available $local_port; do
+        echo "Waiting for port $local_port to become available..."
+        sleep 1
+    done
 
     echo -e "${bold}Tunnel ready:${normal} You can now access $alb_dnsname:$port on ${underline}${bold}localhost:${local_port}${normal}"
     echo "Press enter to exit"; read
@@ -412,9 +408,6 @@ setup_port_forwarding_rds() {
             if [ "$option" == "Go back" ]; then
                 show_menu
             fi
-            # rds_identifier=$(echo "$option" | awk '{print $1}')
-            # rds_endpoint=$(echo "$option" | awk '{print $2}')
-            # rds_port=$(echo "$option" | awk '{print $3}')
             read rds_identifier rds_endpoint rds_port <<< "$option"
 
             echo "Selected RDS Instance: $rds_identifier"
@@ -427,52 +420,11 @@ setup_port_forwarding_rds() {
         fi
     done
 
-    echo "Fetching EC2 instances..."
-    EC2_INSTANCES=$(aws ec2 describe-instances --query "Reservations[*].Instances[*].[InstanceId, Tags[?Key=='Name'].Value | [0]]" --output text)
-    if [ -z "$EC2_INSTANCES" ]; then
-        echo "No EC2 instances found."
-        show_menu
-        return
-    fi
+    fetch_and_select_ec2_instance "setup_port_forwarding_rds"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
 
-    echo "Available EC2 instances for port forwarding:"
-    IFS=$'\n'
-    select target_instance in $EC2_INSTANCES "Go back"; do
-        if [[ -n $target_instance ]]; then
-            if [ "$target_instance" == "Go back" ]; then
-                setup_port_forwarding_rds
-            fi
-            #ec2_instance_id=$(echo "$target_instance" | awk '{print $1}')
-            ec2_instance_id=$(awk '{print $1}' <<< "$target_instance")
-            echo "Selected EC2 instance for tunneling: $ec2_instance_id"
-            break
-        else
-            echo "Invalid selection, please try again."
-        fi
-    done
-    unset IFS
-    IFS=$'\n'
-    select_option=1
-    options=()
-    for instance in $EC2_INSTANCES; do
-        echo "$select_option) $instance"
-        options+=("$instance")
-        select_option=$((select_option + 1))
-    done
-    echo "$select_option) Go back"
-    options+=("Go back")
-    unset IFS
-
-    read -p "Enter the number of the EC2 instance to connect to, or $select_option to go back: " instance_number
-
-    if [ "$instance_number" -eq "$select_option" ]; then
-        show_menu
-        return
-    fi
-
-
-    # Generate a random local port number > 1025
-    local_port=$((RANDOM + 1025))
+    local_port=$(get_available_port)
 
     echo "Setting up port forwarding to RDS $rds_identifier at $rds_endpoint:$rds_port via EC2 instance $ec2_instance_id"
     aws ssm start-session --target $ec2_instance_id --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${rds_port}'"],"localPortNumber":["'$local_port'"],"host":["'${rds_endpoint}'"]}' &
@@ -480,8 +432,11 @@ setup_port_forwarding_rds() {
     # Save the background process PID
     SSM_PID=$!
 
-    # Wait for the port to be ready
-    while ! nc -z localhost $local_port; do sleep 1; done
+    # Loop until the port is available
+    while ! is_port_available $local_port; do
+        echo "Waiting for port $local_port to become available..."
+        sleep 1
+    done
 
     echo -e "${bold}Tunnel ready${normal}: You can now access RDS $rds_identifier on ${underline}${bold}localhost:${local_port}${normal}"
     echo "Press enter to exit"; read
@@ -602,4 +557,3 @@ restart_ecs_service() {
 
 # Start the menu
 show_menu
-
