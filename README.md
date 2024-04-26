@@ -38,7 +38,7 @@ The script provides the following functionalities:
 * ALB Port Forward: Establishes port forwarding through an Application Load Balancer.
 * Connect to ECS Container: Connects to a running ECS container instance.
 * RDS Port Forward: Sets up port forwarding for an RDS database instance.
-* CloudWatch Log Tail: Tails logs from a specified CloudWatch log group.
+* CloudWatch Logs: View, tail, search CloudWatch log group.
 * Restart ECS Service: Restarts a service running on ECS.
 
 Select the desired functionality by entering the corresponding number.

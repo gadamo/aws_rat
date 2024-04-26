@@ -97,7 +97,7 @@ show_menu() {
     echo "3) ALB Port Forward"
     echo "4) Connect to ECS Container"
     echo "5) RDS Port Forward"
-    echo "6) CloudWatch Log Tail"
+    echo "6) CloudWatch Logs"
     echo "7) Restart ECS Service"
     echo "8) Exit"
     printf "Enter your choice ${bold}[1-8]${normal}: "
@@ -108,7 +108,7 @@ show_menu() {
         3) setup_port_forwarding_alb;;
         4) connect_to_container;;
         5) setup_port_forwarding_rds;;
-        6) tail_cloudwatch_logs;;
+        6) cloudwatch_menu;;
         7) restart_ecs_service;;
         8) exit 0;;
         *) echo "Invalid option"; show_menu;;
@@ -451,28 +451,119 @@ setup_port_forwarding_rds() {
 }
 
 #Functionality 6
-tail_cloudwatch_logs() {
-    echo "Fetching available CloudWatch log groups..."
-    LOG_GROUPS=$(aws logs describe-log-groups --query 'logGroups[*].logGroupName' --output text)
+
+# Declare an array for storing CloudWatch log groups and a variable for the selected log group
+declare -a LOG_GROUPS
+SELECTED_LOGGROUP=""
+
+# Function to select a log group from CloudWatch
+select_log_group() {
+    # Fetch log groups if the array is empty
+    if [ -z "$LOG_GROUPS" ]; then
+        echo "Fetching available CloudWatch log groups..."
+        LOG_GROUPS=($(aws logs describe-log-groups --query 'logGroups[*].logGroupName' --output text | tr '\t' '\n'))
+    fi
+
+    # Check if any log groups were retrieved
     if [ -z "$LOG_GROUPS" ]; then
         echo "No CloudWatch log groups found."
-        show_menu
+        show_menu # Return to the main menu
         return
     fi
+
+    # Prompt the user to select a log group
     echo "Available CloudWatch log groups:"
-    select log_group in $LOG_GROUPS "Go back"; do
-        if [[ -n $log_group ]]; then
+    select log_group in "${LOG_GROUPS[@]}" "Go back"; do
+        if [[ -n "$log_group" ]]; then
             if [ "$log_group" == "Go back" ]; then
-                show_menu
+                show_menu  # Return to the main menu
+                return
             fi
-            echo "Starting live tail for log group: $log_group"
-            aws logs tail "$log_group" --follow
+            SELECTED_LOGGROUP="$log_group"  # Store the selected log group
             break
         else
             echo "Invalid selection. Please select a valid log group."
         fi
     done
-    show_menu
+}
+
+# Function to display CloudWatch logs submenu
+cloudwatch_menu() {
+    if [[ -z "$SELECTED_LOGGROUP" ]]; then
+        select_log_group  # Select the log group at the beginning
+    fi
+
+    # CloudWatch submenu with actions after log group selection
+    echo "CloudWatch Logs Menu:"
+    echo "0) Select a different log group [Current: $SELECTED_LOGGROUP]"
+    echo "1) Live tail logs (10 minutes)"
+    echo "2) Live tail logs (last n minutes)"
+    echo "3) Search logs using filter pattern"
+    echo "4) Back to main menu"
+    printf "Enter your choice [0-4]: "
+    read -r choice
+    case $choice in
+        0)
+            select_log_group  # Select a different log group
+            cloudwatch_menu  # Show the CloudWatch menu again
+            ;;
+        1)
+            aws logs tail "$SELECTED_LOGGROUP" --follow  # Live tail for 10 minutes
+            echo "Command ran was: aws logs tail \"$SELECTED_LOGGROUP\" --follow --profile $AWS_PROFILE --region $AWS_DEFAULT_REGION"
+            ;;
+        2)
+            echo "Enter the number of minutes to fetch logs:"
+            read -r minutes
+            aws logs tail "$SELECTED_LOGGROUP" --since "${minutes}m" --follow
+            echo "Command ran was: aws logs tail \"$SELECTED_LOGGROUP\" --since \"${minutes}m\" --follow --profile $AWS_PROFILE --region $AWS_DEFAULT_REGION"
+            ;;
+        3)
+            # Retrieve existing metric filters for the selected log group
+            patterns_json=$(aws logs describe-metric-filters --log-group-name "$SELECTED_LOGGROUP" --query 'metricFilters[*].filterPattern' --output json)
+
+            # Parse JSON output to create a bash array with distinct filter patterns
+            IFS=$'\n' read -d '' -r -a patterns_array < <(echo "$patterns_json" | jq -r '.[]')
+
+            # Prompt the user to select a filter pattern or enter a custom one
+            echo "Select a filter pattern or enter a custom one:"
+            if [[ -n "$custom_pattern" ]]; then
+                patterns_array+=("$custom_pattern")
+            fi
+            select pattern in "${patterns_array[@]}" "Custom"; do
+                if [[ "$pattern" == "Custom" ]]; then
+                    echo "Enter your custom filter pattern:"
+                    read -r custom_pattern
+                    pattern="$custom_pattern"
+                fi
+                # If a valid pattern is selected, use it to filter log events
+                if [[ -n "$pattern" ]]; then
+                    # Prompt the user to specify how many minutes in the past to search
+                    echo "Enter the number of minutes in the past to search:"
+                    read -r minutes_in_past
+
+                    # Calculate the start time based on the current time and the specified minutes
+                    current_time=$(date -u +%s)
+                    start_time=$(((current_time - (minutes_in_past * 60)) * 1000))  # Convert to milliseconds  
+                    # Filter log events based on the specified pattern and time range
+                    aws logs filter-log-events \
+                        --log-group-name "$SELECTED_LOGGROUP" \
+                        --filter-pattern "$pattern" \
+                        --start-time "$start_time"
+                    echo "Command ran was: aws logs filter-log-events --log-group-name \"$SELECTED_LOGGROUP\" --filter-pattern \"$pattern\" --start-time \"$start_time\" --profile $AWS_PROFILE --region $AWS_DEFAULT_REGION"
+                    read -p "Press Enter to return to CloudWatch menu for ${SELECTED_LOGGROUP}..."
+                fi
+                break
+            done
+            ;;
+        4)
+            show_menu  # Return to the main menu
+            ;;
+        *)
+            echo "Invalid choice. Please select a valid option."
+            cloudwatch_menu  # Handling invalid choice
+            ;;
+    esac
+    cloudwatch_menu
 }
 
 #Functionality 7
