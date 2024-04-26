@@ -429,7 +429,7 @@ setup_port_forwarding_rds() {
     local_port=$(get_available_port)
 
     echo "Setting up port forwarding to RDS $rds_identifier at $rds_endpoint:$rds_port via EC2 instance $ec2_instance_id"
-    aws ssm start-session --target $ec2_instance_id --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${rds_port}'"],"localPortNumber":["'$local_port'"],"host":["'${rds_endpoint}'"]}' &
+    aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${rds_port}'"],"localPortNumber":["'$local_port'"],"host":["'${rds_endpoint}'"]}' &
 
     # Save the background process PID
     SSM_PID=$!
