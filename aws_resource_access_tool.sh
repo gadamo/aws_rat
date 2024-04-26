@@ -92,26 +92,26 @@ export AWS_DEFAULT_REGION
 # Main menu function
 show_menu() {
     echo "Select a functionality:"
-    echo "1) EC2 Shell (SSM)"
-    echo "2) SSH via SSM"
-    echo "3) ALB Port Forward"
+    echo "1) CloudWatch Logs"
+    echo "2) EC2 Shell (SSM)"
+    echo "3) SSH via SSM"
     echo "4) Connect to ECS Container"
-    echo "5) RDS Port Forward"
-    echo "6) CloudWatch Logs"
+    echo "5) ALB Port Forward"
+    echo "6) RDS Port Forward"
     echo "7) Restart ECS Service"
     echo "8) Exit"
-    printf "Enter your choice ${bold}[1-8]${normal}: "
+    printf "Enter your choice [1-8]: "
     read -r choice
     case $choice in
-        1) connect_to_ec2;;
-        2) setup_port_forwarding_ssh;;
-        3) setup_port_forwarding_alb;;
+        1) cloudwatch_menu;;
+        2) connect_to_ec2;;
+        3) setup_port_forwarding_ssh;;
         4) connect_to_container;;
-        5) setup_port_forwarding_rds;;
-        6) cloudwatch_menu;;
+        5) setup_port_forwarding_alb;;
+        6) setup_port_forwarding_rds;;
         7) restart_ecs_service;;
         8) exit 0;;
-        *) echo "Invalid option"; show_menu;;
+        *) echo "Invalid option"; show_menu;;  # Handling invalid choices
     esac
 }
 
@@ -175,282 +175,7 @@ get_available_port() {
     done
 }
 
-# Functionality 1
-connect_to_ec2() {
-    fetch_and_select_ec2_instance "show_menu"
-    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
-    target_instance=$GLOBAL_SELECTED_INSTANCE
-
-    if [ -n "$target_instance" ]; then
-        echo "Starting SSM session to EC2 instance: $target_instance"
-        aws ssm start-session --target $target_instance
-    else
-        echo "Invalid instance number selected."
-    fi
-
-    show_menu
-}
-
-# Functionality 2
-setup_port_forwarding_ssh() {
-    fetch_and_select_ec2_instance "show_menu"
-    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
-    target_instance=$GLOBAL_SELECTED_INSTANCE
-
-    if [ -n "$target_instance" ]; then
-        local_port=$(get_available_port)
-        echo "Setting up port forwarding on port $local_port and initiating SSH session to EC2 instance: $target_instance"
-        aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSession --parameters "{\"portNumber\":[\"22\"],\"localPortNumber\":[\"$local_port\"]}" &
-        # Save the background process PID
-        SSM_PID=$!
-        # Loop until the port is available
-        while ! is_port_open $local_port; do
-            echo "Waiting for port $local_port to become available..."
-            sleep 1
-        done
-        # Display instructions
-        echo -e "${bold}Tunnel ready:${normal} You can now access $target_instance SSH port on ${underline}${bold}localhost:${local_port}${normal}"
-        echo -e "e.g.: ${underline}${bold}sftp -P $local_port ec2-user@localhost${normal}"
-        echo -e "e.g.: ${underline}${bold}scp  -P $local_port ec2-user@localhost:/etc/shells /tmp/test${normal}"
-        echo -e "e.g.: ${underline}${bold}ssh -p $local_port ec2-user@localhost${normal}"
-        # Start the SSH session
-        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $local_port ec2-user@localhost
-        # SSH session has ended, now kill the SSM port forwarding session
-        SSM_PID="$! $(pgrep -P $!)"
-        kill $SSM_PID
-        echo "SSM port forwarding session terminated."
-    else
-        echo "Invalid instance number selected."
-    fi
-
-    show_menu
-} 
-
-# Functionality 3
-setup_port_forwarding_alb() {
-    echo "Fetching available ALBs..."
-    ALBS_JSON=$(aws elbv2 describe-load-balancers --query "LoadBalancers[*].[DNSName, LoadBalancerArn]" --output json)
-    if [ -z "$ALBS_JSON" ]; then
-        echo "No ALBs found."
-        show_menu
-        return
-    fi
-
-    # Parse and display DNS names for selection, storing ARNs in an associative array
-    declare -a DNS_NAMES
-    declare -A DNS_ARN_MAP
-
-    # Fill DNS_NAMES array and DNS_ARN_MAP associative array
-    while IFS=$'\t' read -r dnsname arn; do
-        DNS_NAMES+=("$dnsname")
-        DNS_ARN_MAP["$dnsname"]=$arn
-    done < <(jq -r '.[] | .[0] + "\t" + .[1]' <<< "$ALBS_JSON")
-
-    echo "Available ALBs:"
-    select option in "${DNS_NAMES[@]}" "Go back"; do
-        if [[ -n $option ]]; then
-            if [ "$option" == "Go back" ]; then
-                show_menu
-            fi
-            alb_dnsname=$option
-            alb_arn=${DNS_ARN_MAP[$alb_dnsname]}
-
-            echo "Selected DNS Name: $alb_dnsname"
-            echo "Selected ARN: $alb_arn"
-
-            break
-        else
-            echo "Invalid option. Please select a valid option."
-        fi
-    done
-
-    echo "Fetching listening ports for $alb_dnsname..."
-    LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn $alb_arn --query "Listeners[*].Port" --output text)
-    if [ -z "$LISTENERS" ]; then
-        echo "No listeners found for $alb_dnsname."
-        show_menu
-        return
-    fi
-
-    echo "Available listening ports on $alb_dnsname:"
-    select port in $LISTENERS "Go back"; do
-        if [[ -n "$port" ]]; then
-            if [ "$port" == "Go back" ]; then
-                setup_port_forwarding_alb
-            fi
-            break        
-        else
-            echo "Invalid selection, please try again."
-        fi
-    done
-
-    fetch_and_select_ec2_instance "setup_port_forwarding_alb"
-    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
-    target_instance=$GLOBAL_SELECTED_INSTANCE
-
-    local_port=$(get_available_port)
-
-    echo "Setting up port forwarding to $alb_dnsname:$port - via $target_instance"
-    aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${port}'"],"localPortNumber":["'$local_port'"],"host":["'${alb_dnsname}'"]}' &
-
-    # Save the background process PID
-    SSM_PID=$!
-
-    # Loop until the port is available
-    while ! is_port_open $local_port; do
-        echo "Waiting for port $local_port to become available..."
-        sleep 1
-    done
-
-    echo -e "${bold}Tunnel ready:${normal} You can now access $alb_dnsname:$port on ${underline}${bold}localhost:${local_port}${normal}"
-    echo "Press enter to exit"; read
-
-    # User session has ended, now kill the SSM port forwarding session
-    SSM_PID="$! $(pgrep -P $!)"
-    kill $SSM_PID
-    echo "SSM port forwarding session terminated."
-    show_menu
-}
-
-# Global arrays for caching
-declare -A container_map
-declare -A instance_map
-container_options=()
-
-# Functionality 4
-connect_to_container() {
-    # Fetch data when global vars are empty (thus, use cache when already populated)
-    if [ ${#container_options[@]} -eq 0 ]; then
-        echo "Fetching ECS clusters..."
-        clusters=$(aws ecs list-clusters --query 'clusterArns' --output text)
-        if [ -z "$clusters" ]; then
-            echo "No ECS clusters found."
-            show_menu
-            return
-        fi
-
-        for cluster_arn in $clusters; do
-            echo "Processing cluster: $cluster_arn"
-            ecs_instances=$(aws ecs list-container-instances --cluster "$cluster_arn" --query 'containerInstanceArns' --output text)
-            for instance_arn in $ecs_instances; do
-                ec2_instance_id=$(aws ecs describe-container-instances --cluster "$cluster_arn" --container-instances $instance_arn --query 'containerInstances[].ec2InstanceId' --output text)
-                echo "Listing tasks on EC2 instance: $ec2_instance_id"
-                tasks=$(aws ecs list-tasks --cluster "$cluster_arn" --container-instance "$instance_arn" --query 'taskArns' --output text)
-                # Single call to describe all tasks
-                tasks_details=$(aws ecs describe-tasks --cluster "$cluster_arn" --tasks $tasks --output json)
-                # Parse JSON response to loop through each task and extract necessary details
-                while IFS= read -r task; do
-                    container_id=$(jq -r '.containers[0].runtimeId' <<< "$task")
-                    container_name=$(jq -r '.containers[0].name' <<< "$task")
-                    service_name=$(jq -r '.group | sub("^service:"; "")' <<< "$task")
-
-                    if [ -n "$container_id" ] && [ -n "$ec2_instance_id" ]; then
-                        option="$service_name:$container_name:$ec2_instance_id"
-                        container_options+=("$option")
-                        container_map["$option"]=$container_id
-                        instance_map["$option"]=$ec2_instance_id
-                    fi
-                done < <(jq -c '.tasks[]' <<< "$tasks_details")
-            done
-        done
-    fi
-
-    if [ ${#container_options[@]} -eq 0 ]; then
-        echo "No containers found in ECS clusters."
-        show_menu
-        return
-    fi
-
-    echo "Available containers:"
-    select option in "${container_options[@]}" "Go back"; do
-        if [ -n "$option" ]; then
-            if [ "$option" == "Go back" ]; then
-                show_menu
-            fi
-            break
-        else
-            echo "Invalid selection, please try again."
-        fi
-    done
-
-    selected_container_id=${container_map["$option"]}
-    selected_instance_id=${instance_map["$option"]}
-
-    if [ -n "$selected_container_id" ] && [ -n "$selected_instance_id" ]; then
-        echo "Connecting to container $selected_container_id on instance $selected_instance_id"
-        aws ssm start-session --target "$selected_instance_id" \
-            --document-name "AWS-StartInteractiveCommand" \
-            --parameters command="sudo docker exec -ti $selected_container_id sh"
-    else
-        echo "Invalid selection."
-    fi
-
-    show_menu
-}
-
-# Functionality 5
-setup_port_forwarding_rds() {
-    echo "Fetching available RDS instances..."
-    RDS_INSTANCES=$(aws rds describe-db-instances --query "DBInstances[*].[DBInstanceIdentifier, Endpoint.Address, Endpoint.Port]" --output text)
-    if [ -z "$RDS_INSTANCES" ]; then
-        echo "No RDS instances found."
-        show_menu
-        return
-    fi
-
-    # Initialize an array
-    declare -a RDS_ARRAY
-
-    # Read each line of output into the array
-    readarray -t RDS_ARRAY <<< "$RDS_INSTANCES"
-
-    echo "Available RDS instances:"
-    select option in "${RDS_ARRAY[@]}" "Go back"; do
-        if [[ -n $option ]]; then
-            if [ "$option" == "Go back" ]; then
-                show_menu
-            fi
-            read rds_identifier rds_endpoint rds_port <<< "$option"
-
-            echo "Selected RDS Instance: $rds_identifier"
-            echo "Endpoint: $rds_endpoint"
-            echo "Port: $rds_port"
-
-            break
-        else
-            echo "Invalid option. Please select a valid option."
-        fi
-    done
-
-    fetch_and_select_ec2_instance "setup_port_forwarding_rds"
-    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
-    target_instance=$GLOBAL_SELECTED_INSTANCE
-
-    local_port=$(get_available_port)
-
-    echo "Setting up port forwarding to RDS $rds_identifier at $rds_endpoint:$rds_port via EC2 instance $ec2_instance_id"
-    aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${rds_port}'"],"localPortNumber":["'$local_port'"],"host":["'${rds_endpoint}'"]}' &
-
-    # Save the background process PID
-    SSM_PID=$!
-
-    # Loop until the port is available
-    while ! is_port_open $local_port; do
-        echo "Waiting for port $local_port to become available..."
-        sleep 1
-    done
-
-    echo -e "${bold}Tunnel ready${normal}: You can now access RDS $rds_identifier on ${underline}${bold}localhost:${local_port}${normal}"
-    echo "Press enter to exit"; read
-
-    # User session has ended, now kill the SSM port forwarding session
-    SSM_PID="$! $(pgrep -P $!)"
-    kill $SSM_PID
-    echo "SSM port forwarding session terminated."
-    show_menu
-}
-
-#Functionality 6
+#Functionality 1 - Cloudwatch Logs
 
 # Declare an array for storing CloudWatch log groups and a variable for the selected log group
 declare -a LOG_GROUPS
@@ -523,6 +248,7 @@ cloudwatch_menu() {
 
             # Parse JSON output to create a bash array with distinct filter patterns
             IFS=$'\n' read -d '' -r -a patterns_array < <(echo "$patterns_json" | jq -r '.[]')
+            unset IFS
 
             # Prompt the user to select a filter pattern or enter a custom one
             echo "Select a filter pattern or enter a custom one:"
@@ -566,7 +292,291 @@ cloudwatch_menu() {
     cloudwatch_menu
 }
 
-#Functionality 7
+
+# Functionality 2 - EC2 Shell (SSM)
+connect_to_ec2() {
+    fetch_and_select_ec2_instance "show_menu"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
+
+    if [ -n "$target_instance" ]; then
+        echo "Starting SSM session to EC2 instance: $target_instance"
+        aws ssm start-session --target $target_instance
+    else
+        echo "Invalid instance number selected."
+    fi
+
+    show_menu
+}
+
+# Functionality 3 - SSH via SSM
+setup_port_forwarding_ssh() {
+    fetch_and_select_ec2_instance "show_menu"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
+
+    if [ -n "$target_instance" ]; then
+        local_port=$(get_available_port)
+        echo "Setting up port forwarding on port $local_port and initiating SSH session to EC2 instance: $target_instance"
+        aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSession --parameters "{\"portNumber\":[\"22\"],\"localPortNumber\":[\"$local_port\"]}" &
+        # Save the background process PID
+        SSM_PID=$!
+        # Loop until the port is available
+        while ! is_port_open $local_port; do
+            echo "Waiting for port $local_port to become available..."
+            sleep 1
+        done
+        # Display instructions
+        echo -e "${bold}Tunnel ready:${normal} You can now access $target_instance SSH port on ${underline}${bold}localhost:${local_port}${normal}"
+        echo -e "e.g.: ${underline}${bold}sftp -P $local_port ec2-user@localhost${normal}"
+        echo -e "e.g.: ${underline}${bold}scp  -P $local_port ec2-user@localhost:/etc/shells /tmp/test${normal}"
+        echo -e "e.g.: ${underline}${bold}ssh -p $local_port ec2-user@localhost${normal}"
+        # Start the SSH session
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $local_port ec2-user@localhost
+        # SSH session has ended, now kill the SSM port forwarding session
+        SSM_PID="$! $(pgrep -P $!)"
+        kill $SSM_PID
+        echo "SSM port forwarding session terminated."
+    else
+        echo "Invalid instance number selected."
+    fi
+
+    show_menu
+} 
+
+
+# Global arrays for caching
+declare -A container_map
+declare -A instance_map
+container_options=()
+
+# Functionality 4 - Connect to ECS Container
+connect_to_container() {
+    set -x
+    # Fetch data when global vars are empty (thus, use cache when already populated)
+    if [ ${#container_options[@]} -eq 0 ]; then
+        echo "Fetching ECS clusters..."
+        clusters=$(aws ecs list-clusters --query 'clusterArns' --output text)
+        if [ -z "$clusters" ]; then
+            echo "No ECS clusters found."
+            show_menu
+            return
+        fi
+
+        for cluster_arn in $clusters; do
+            echo "Processing cluster: $cluster_arn"
+            ecs_instances=$(aws ecs list-container-instances --cluster "$cluster_arn" --query 'containerInstanceArns' --output text | tr '\t' '\n')
+            for instance_arn in $ecs_instances; do
+                ec2_instance_id=$(aws ecs describe-container-instances --cluster "$cluster_arn" --container-instances $instance_arn --query 'containerInstances[].ec2InstanceId' --output text)
+                echo "Listing tasks on EC2 instance: $ec2_instance_id"
+                tasks=$(aws ecs list-tasks --cluster "$cluster_arn" --container-instance "$instance_arn" --query 'taskArns' --output text | tr '\t' '\n')
+                # Single call to describe all tasks
+                tasks_details=$(aws ecs describe-tasks --cluster "$cluster_arn" --tasks $tasks --output json)
+                # Parse JSON response to loop through each task and extract necessary details
+                while IFS= read -r task; do
+                    container_id=$(jq -r '.containers[0].runtimeId' <<< "$task")
+                    container_name=$(jq -r '.containers[0].name' <<< "$task")
+                    service_name=$(jq -r '.group | sub("^service:"; "")' <<< "$task")
+
+                    if [ -n "$container_id" ] && [ -n "$ec2_instance_id" ]; then
+                        option="$service_name:$container_name:$ec2_instance_id"
+                        container_options+=("$option")
+                        container_map["$option"]=$container_id
+                        instance_map["$option"]=$ec2_instance_id
+                    fi
+                done < <(jq -c '.tasks[]' <<< "$tasks_details")
+                unset IFS
+            done
+        done
+    fi
+    set +x
+###aws ecs list-container-instances --cluster arn:aws:ecs:eu-central-1:211125386281:cluster/production --query containerInstanceArns --output text
+### aws ecs describe-container-instances --cluster arn:aws:ecs:eu-central-1:211125386281:cluster/production --container-instances 'arn:aws:ecs:eu-central-1:211125386281:container-instance/production/109d32c808ea4b6c8d34deea35c693a5      arn:aws:ecs:eu-central-1:211125386281:container-instance/production/4c39581759b64d8a9cccad740d965340' --query 'containerInstances[].ec2InstanceId' --output text
+    if [ ${#container_options[@]} -eq 0 ]; then
+        echo "No containers found in ECS clusters."
+        show_menu
+        return
+    fi
+
+    echo "Available containers:"
+    select option in "${container_options[@]}" "Go back"; do
+        if [ -n "$option" ]; then
+            if [ "$option" == "Go back" ]; then
+                show_menu
+            fi
+            break
+        else
+            echo "Invalid selection, please try again."
+        fi
+    done
+
+    selected_container_id=${container_map["$option"]}
+    selected_instance_id=${instance_map["$option"]}
+
+    if [ -n "$selected_container_id" ] && [ -n "$selected_instance_id" ]; then
+        echo "Connecting to container $selected_container_id on instance $selected_instance_id"
+        aws ssm start-session --target "$selected_instance_id" \
+            --document-name "AWS-StartInteractiveCommand" \
+            --parameters command="sudo docker exec -ti $selected_container_id sh"
+    else
+        echo "Invalid selection."
+    fi
+
+    show_menu
+}
+
+# Functionality 5 - ALB Port Forward
+setup_port_forwarding_alb() {
+    echo "Fetching available ALBs..."
+    ALBS_JSON=$(aws elbv2 describe-load-balancers --query "LoadBalancers[*].[DNSName, LoadBalancerArn]" --output json)
+    if [ -z "$ALBS_JSON" ]; then
+        echo "No ALBs found."
+        show_menu
+        return
+    fi
+
+    # Parse and display DNS names for selection, storing ARNs in an associative array
+    declare -a DNS_NAMES
+    declare -A DNS_ARN_MAP
+
+    # Fill DNS_NAMES array and DNS_ARN_MAP associative array
+    while IFS=$'\t' read -r dnsname arn; do
+        DNS_NAMES+=("$dnsname")
+        DNS_ARN_MAP["$dnsname"]=$arn
+    done < <(jq -r '.[] | .[0] + "\t" + .[1]' <<< "$ALBS_JSON")
+    unset IFS
+
+    echo "Available ALBs:"
+    select option in "${DNS_NAMES[@]}" "Go back"; do
+        if [[ -n $option ]]; then
+            if [ "$option" == "Go back" ]; then
+                show_menu
+            fi
+            alb_dnsname=$option
+            alb_arn=${DNS_ARN_MAP[$alb_dnsname]}
+
+            echo "Selected DNS Name: $alb_dnsname"
+            echo "Selected ARN: $alb_arn"
+
+            break
+        else
+            echo "Invalid option. Please select a valid option."
+        fi
+    done
+
+    echo "Fetching listening ports for $alb_dnsname..."
+    LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn $alb_arn --query "Listeners[*].Port" --output text)
+    if [ -z "$LISTENERS" ]; then
+        echo "No listeners found for $alb_dnsname."
+        show_menu
+        return
+    fi
+
+    echo "Available listening ports on $alb_dnsname:"
+    select port in $LISTENERS "Go back"; do
+        if [[ -n "$port" ]]; then
+            if [ "$port" == "Go back" ]; then
+                setup_port_forwarding_alb
+            fi
+            break        
+        else
+            echo "Invalid selection, please try again."
+        fi
+    done
+
+    fetch_and_select_ec2_instance "setup_port_forwarding_alb"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
+
+    local_port=$(get_available_port)
+
+    echo "Setting up port forwarding to $alb_dnsname:$port - via $target_instance"
+    aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${port}'"],"localPortNumber":["'$local_port'"],"host":["'${alb_dnsname}'"]}' &
+
+    # Save the background process PID
+    SSM_PID=$!
+
+    # Loop until the port is available
+    while ! is_port_open $local_port; do
+        echo "Waiting for port $local_port to become available..."
+        sleep 1
+    done
+
+    echo -e "${bold}Tunnel ready:${normal} You can now access $alb_dnsname:$port on ${underline}${bold}localhost:${local_port}${normal}"
+    echo "Press enter to exit"; read
+
+    # User session has ended, now kill the SSM port forwarding session
+    SSM_PID="$! $(pgrep -P $!)"
+    kill $SSM_PID
+    echo "SSM port forwarding session terminated."
+    show_menu
+}
+
+
+# Functionality 6 - RDS Port Forward
+setup_port_forwarding_rds() {
+    echo "Fetching available RDS instances..."
+    RDS_INSTANCES=$(aws rds describe-db-instances --query "DBInstances[*].[DBInstanceIdentifier, Endpoint.Address, Endpoint.Port]" --output text)
+    if [ -z "$RDS_INSTANCES" ]; then
+        echo "No RDS instances found."
+        show_menu
+        return
+    fi
+
+    # Initialize an array
+    declare -a RDS_ARRAY
+
+    # Read each line of output into the array
+    readarray -t RDS_ARRAY <<< "$RDS_INSTANCES"
+
+    echo "Available RDS instances:"
+    select option in "${RDS_ARRAY[@]}" "Go back"; do
+        if [[ -n $option ]]; then
+            if [ "$option" == "Go back" ]; then
+                show_menu
+            fi
+            read rds_identifier rds_endpoint rds_port <<< "$option"
+
+            echo "Selected RDS Instance: $rds_identifier"
+            echo "Endpoint: $rds_endpoint"
+            echo "Port: $rds_port"
+
+            break
+        else
+            echo "Invalid option. Please select a valid option."
+        fi
+    done
+
+    fetch_and_select_ec2_instance "setup_port_forwarding_rds"
+    echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
+    target_instance=$GLOBAL_SELECTED_INSTANCE
+
+    local_port=$(get_available_port)
+
+    echo "Setting up port forwarding to RDS $rds_identifier at $rds_endpoint:$rds_port via EC2 instance $ec2_instance_id"
+    aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${rds_port}'"],"localPortNumber":["'$local_port'"],"host":["'${rds_endpoint}'"]}' &
+
+    # Save the background process PID
+    SSM_PID=$!
+
+    # Loop until the port is available
+    while ! is_port_open $local_port; do
+        echo "Waiting for port $local_port to become available..."
+        sleep 1
+    done
+
+    echo -e "${bold}Tunnel ready${normal}: You can now access RDS $rds_identifier on ${underline}${bold}localhost:${local_port}${normal}"
+    echo "Press enter to exit"; read
+
+    # User session has ended, now kill the SSM port forwarding session
+    SSM_PID="$! $(pgrep -P $!)"
+    kill $SSM_PID
+    echo "SSM port forwarding session terminated."
+    show_menu
+}
+
+
+#Functionality 7 - Restart ECS Service
 restart_ecs_service() {
     echo "Fetching ECS clusters..."
     clusters=$(aws ecs list-clusters --query 'clusterArns' --output text)
