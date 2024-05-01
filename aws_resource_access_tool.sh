@@ -4,90 +4,20 @@ bold='\033[1m'
 underline='\033[4m'
 normal='\033[0m'
 
-check_prerequisites() {
-    # Check Bash version (Bash 4.0+)
-    if [[ "${BASH_VERSION:0:1}" -lt 4 ]]; then
-        echo "This script requires Bash version 4.0 or higher. You are using Bash $BASH_VERSION."
-        return 1
-    fi
-
-    # Check for AWS CLI installation
-    if ! command -v aws >/dev/null 2>&1; then
-        echo "AWS CLI is not installed. Please install it and configure your credentials."
-        return 1
-    fi
-
-    # Check for AWS CLI credentials configuration
-    if [[ ! -f ~/.aws/credentials ]] && [[ -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" ]]; then
-        echo "AWS credentials are not properly set. Please configure them in ~/.aws/credentials or set the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables."
-        return 1
-    fi
-
-    # Check for AWS SSM Session Manager Plugin installation
-    if ! command -v session-manager-plugin >/dev/null 2>&1; then
-        echo "AWS SSM Session Manager Plugin is not installed. Please install it to continue."
-        return 1
-    fi
-
-    # Check for jq installation
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "jq is not installed. Please install jq to process JSON data."
-        return 1
-    fi
-
-    return 0
-}
-
-# Execute the check
-check_prerequisites || exit 1
-
 # Check for AWS profile and default region
-if [[ -n $AWS_PROFILE && -n $AWS_DEFAULT_REGION ]]; then
+if [ -n "$AWS_PROFILE" ] && [ -n "$AWS_DEFAULT_REGION" ]; then
     echo "Using AWS profile and default region from environment variables."
-elif [[ -n $AWS_ACCESS_KEY_ID && -n $AWS_SECRET_ACCESS_KEY ]]; then
+elif [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
     echo "Using AWS access key and secret from environment variables."
-    
-    # Check for session token if needed
-    if [[ -n $AWS_SESSION_TOKEN ]]; then
+    if [ -n "$AWS_SESSION_TOKEN" ]; then
         echo "Using AWS session token from environment variables."
     fi
 else
-    echo "INFO: AWS credentials or profile not properly set in environment variables."
-    # Prompt the user to select a profile from the available ones in ~/.aws/credentials
-    if [[ -z "$AWS_PROFILE" ]]; then
-        profiles=$(grep -o ^"\[[^]]*\]" ~/.aws/credentials | sed 's/\[\(.*\)\]/\1/')
-        readarray -t awsProfiles <<<"$profiles"
-        echo "Please select a profile: "
-        select AWS_PROFILE in "${awsProfiles[@]}"; do
-            if [ -n "$AWS_PROFILE" ]; then
-                echo "You selected $AWS_PROFILE"
-                break
-            else
-                echo "Invalid selection. Please try again."
-            fi
-        done
-        echo -e "INFO: You can skip step above running: ${bold}export AWS_PROFILE=$AWS_PROFILE${normal}"
-    fi
-    export AWS_PROFILE
+    echo -e "${bold}ERROR:${normal} AWS credentials or profile not properly set in environment variables."
+    echo -e "       ${underline}e.g.${normal} export AWS_PROFILE=your_profile_name AWS_DEFAULT_REGION=us-east-1"
+    echo -e "       ${underline}or${normal}   export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=..."
+    exit 1
 fi
-
-if [[ -z "$AWS_DEFAULT_REGION" ]]; then
-    regions=$(aws --region us-east-1 ec2 describe-regions --query "Regions[].RegionName" | jq -r 'sort[]')
-    # Prompt user to select a region
-    echo "Select a region:"
-    select region in $regions; do
-        if [[ -n "$region" ]]; then
-            AWS_DEFAULT_REGION=$region
-            echo "Selected region: $AWS_DEFAULT_REGION"
-            break
-        else
-            echo "Invalid selection, please try again."
-        fi
-    done
-    echo -e "INFO: You can skip step above running: ${bold}export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION${normal}"
-fi
-export AWS_DEFAULT_REGION
-
 
 # Main menu function
 show_menu() {
@@ -152,7 +82,8 @@ is_port_open() {
     local port=$1
 
     # Attempt to write to the port; if it fails, the port is not open
-    (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1
+    (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
+    # shellcheck disable=SC2181
     if [ $? -ne 0 ]; then
         return 1  # 1 means false in shell scripts, port is not open
     else
@@ -184,13 +115,13 @@ SELECTED_LOGGROUP=""
 # Function to select a log group from CloudWatch
 select_log_group() {
     # Fetch log groups if the array is empty
-    if [ -z "$LOG_GROUPS" ]; then
+    if [ "${#LOG_GROUPS[@]}" -eq 0 ]; then
         echo "Fetching available CloudWatch log groups..."
-        LOG_GROUPS=($(aws logs describe-log-groups --query 'logGroups[*].logGroupName' --output text | tr '\t' '\n'))
+        mapfile -t LOG_GROUPS < <(aws logs describe-log-groups --query 'logGroups[*].logGroupName' --output text | tr '\t' '\n')
     fi
 
     # Check if any log groups were retrieved
-    if [ -z "$LOG_GROUPS" ]; then
+    if [ "${#LOG_GROUPS[@]}" -eq 0 ]; then
         echo "No CloudWatch log groups found."
         show_menu # Return to the main menu
         return
@@ -276,7 +207,7 @@ cloudwatch_menu() {
                         --filter-pattern "$pattern" \
                         --start-time "$start_time"
                     echo "Command ran was: aws logs filter-log-events --log-group-name \"$SELECTED_LOGGROUP\" --filter-pattern \"$pattern\" --start-time \"$start_time\" --profile $AWS_PROFILE --region $AWS_DEFAULT_REGION"
-                    read -p "Press Enter to return to CloudWatch menu for ${SELECTED_LOGGROUP}..."
+                    read -r -p "Press Enter to return to CloudWatch menu for ${SELECTED_LOGGROUP}..."
                 fi
                 break
             done
@@ -301,7 +232,7 @@ connect_to_ec2() {
 
     if [ -n "$target_instance" ]; then
         echo "Starting SSM session to EC2 instance: $target_instance"
-        aws ssm start-session --target $target_instance
+        aws ssm start-session --target "$target_instance"
     else
         echo "Invalid instance number selected."
     fi
@@ -318,11 +249,11 @@ setup_port_forwarding_ssh() {
     if [ -n "$target_instance" ]; then
         local_port=$(get_available_port)
         echo "Setting up port forwarding on port $local_port and initiating SSH session to EC2 instance: $target_instance"
-        aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSession --parameters "{\"portNumber\":[\"22\"],\"localPortNumber\":[\"$local_port\"]}" &
+        aws ssm start-session --target "$target_instance" --document-name AWS-StartPortForwardingSession --parameters "{\"portNumber\":[\"22\"],\"localPortNumber\":[\"$local_port\"]}" &
         # Save the background process PID
         SSM_PID=$!
         # Loop until the port is available
-        while ! is_port_open $local_port; do
+        while ! is_port_open "$local_port"; do
             echo "Waiting for port $local_port to become available..."
             sleep 1
         done
@@ -332,10 +263,11 @@ setup_port_forwarding_ssh() {
         echo -e "e.g.: ${underline}${bold}scp  -P $local_port ec2-user@localhost:/etc/shells /tmp/test${normal}"
         echo -e "e.g.: ${underline}${bold}ssh -p $local_port ec2-user@localhost${normal}"
         # Start the SSH session
-        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $local_port ec2-user@localhost
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$local_port" ec2-user@localhost
         # SSH session has ended, now kill the SSM port forwarding session
-        SSM_PID="$! $(pgrep -P $!)"
-        kill $SSM_PID
+        mapfile -t SSM_PIDS < <(echo "$SSM_PID"; pgrep -P "$SSM_PID")
+        kill "${SSM_PIDS[@]}"
+        unset SSM_PID SSM_PIDS
         echo "SSM port forwarding session terminated."
     else
         echo "Invalid instance number selected."
@@ -352,7 +284,6 @@ container_options=()
 
 # Functionality 4 - Connect to ECS Container
 connect_to_container() {
-    set -x
     # Fetch data when global vars are empty (thus, use cache when already populated)
     if [ ${#container_options[@]} -eq 0 ]; then
         echo "Fetching ECS clusters..."
@@ -367,11 +298,11 @@ connect_to_container() {
             echo "Processing cluster: $cluster_arn"
             ecs_instances=$(aws ecs list-container-instances --cluster "$cluster_arn" --query 'containerInstanceArns' --output text | tr '\t' '\n')
             for instance_arn in $ecs_instances; do
-                ec2_instance_id=$(aws ecs describe-container-instances --cluster "$cluster_arn" --container-instances $instance_arn --query 'containerInstances[].ec2InstanceId' --output text)
+                ec2_instance_id=$(aws ecs describe-container-instances --cluster "$cluster_arn" --container-instances "$instance_arn" --query 'containerInstances[].ec2InstanceId' --output text)
                 echo "Listing tasks on EC2 instance: $ec2_instance_id"
-                tasks=$(aws ecs list-tasks --cluster "$cluster_arn" --container-instance "$instance_arn" --query 'taskArns' --output text | tr '\t' '\n')
+                mapfile -t taskArns < <(aws ecs list-tasks --cluster "$cluster_arn" --container-instance "$instance_arn" --query 'taskArns[]' --output json | jq -r '.[]')
                 # Single call to describe all tasks
-                tasks_details=$(aws ecs describe-tasks --cluster "$cluster_arn" --tasks $tasks --output json)
+                tasks_details=$(aws ecs describe-tasks --cluster "$cluster_arn" --tasks "${taskArns[@]}" --output json)
                 # Parse JSON response to loop through each task and extract necessary details
                 while IFS= read -r task; do
                     container_id=$(jq -r '.containers[0].runtimeId' <<< "$task")
@@ -389,9 +320,6 @@ connect_to_container() {
             done
         done
     fi
-    set +x
-###aws ecs list-container-instances --cluster arn:aws:ecs:eu-central-1:211125386281:cluster/production --query containerInstanceArns --output text
-### aws ecs describe-container-instances --cluster arn:aws:ecs:eu-central-1:211125386281:cluster/production --container-instances 'arn:aws:ecs:eu-central-1:211125386281:container-instance/production/109d32c808ea4b6c8d34deea35c693a5      arn:aws:ecs:eu-central-1:211125386281:container-instance/production/4c39581759b64d8a9cccad740d965340' --query 'containerInstances[].ec2InstanceId' --output text
     if [ ${#container_options[@]} -eq 0 ]; then
         echo "No containers found in ECS clusters."
         show_menu
@@ -465,7 +393,7 @@ setup_port_forwarding_alb() {
     done
 
     echo "Fetching listening ports for $alb_dnsname..."
-    LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn $alb_arn --query "Listeners[*].Port" --output text)
+    LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" --query "Listeners[*].Port" --output text)
     if [ -z "$LISTENERS" ]; then
         echo "No listeners found for $alb_dnsname."
         show_menu
@@ -491,23 +419,26 @@ setup_port_forwarding_alb() {
     local_port=$(get_available_port)
 
     echo "Setting up port forwarding to $alb_dnsname:$port - via $target_instance"
-    aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${port}'"],"localPortNumber":["'$local_port'"],"host":["'${alb_dnsname}'"]}' &
+    aws ssm start-session --target "$target_instance" --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'"${port}"'"],"localPortNumber":["'"$local_port"'"],"host":["'"${alb_dnsname}"'"]}' &
 
     # Save the background process PID
     SSM_PID=$!
 
     # Loop until the port is available
-    while ! is_port_open $local_port; do
+    while ! is_port_open "$local_port"; do
         echo "Waiting for port $local_port to become available..."
         sleep 1
     done
 
     echo -e "${bold}Tunnel ready:${normal} You can now access $alb_dnsname:$port on ${underline}${bold}localhost:${local_port}${normal}"
-    echo "Press enter to exit"; read
+    echo "Press enter to exit";
+    # shellcheck disable=SC2162
+    read
 
     # User session has ended, now kill the SSM port forwarding session
-    SSM_PID="$! $(pgrep -P $!)"
-    kill $SSM_PID
+    mapfile -t SSM_PIDS < <(echo "$SSM_PID"; pgrep -P "$SSM_PID")
+    kill "${SSM_PIDS[@]}"
+    unset SSM_PID SSM_PIDS
     echo "SSM port forwarding session terminated."
     show_menu
 }
@@ -523,9 +454,6 @@ setup_port_forwarding_rds() {
         return
     fi
 
-    # Initialize an array
-    declare -a RDS_ARRAY
-
     # Read each line of output into the array
     readarray -t RDS_ARRAY <<< "$RDS_INSTANCES"
 
@@ -534,8 +462,9 @@ setup_port_forwarding_rds() {
         if [[ -n $option ]]; then
             if [ "$option" == "Go back" ]; then
                 show_menu
+                return
             fi
-            read rds_identifier rds_endpoint rds_port <<< "$option"
+            read -r rds_identifier rds_endpoint rds_port <<< "$option"
 
             echo "Selected RDS Instance: $rds_identifier"
             echo "Endpoint: $rds_endpoint"
@@ -554,23 +483,26 @@ setup_port_forwarding_rds() {
     local_port=$(get_available_port)
 
     echo "Setting up port forwarding to RDS $rds_identifier at $rds_endpoint:$rds_port via EC2 instance $ec2_instance_id"
-    aws ssm start-session --target $target_instance --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'${rds_port}'"],"localPortNumber":["'$local_port'"],"host":["'${rds_endpoint}'"]}' &
+    aws ssm start-session --target "$target_instance" --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'"${rds_port}"'"],"localPortNumber":["'"$local_port"'"],"host":["'"${rds_endpoint}"'"]}' &
 
     # Save the background process PID
     SSM_PID=$!
 
     # Loop until the port is available
-    while ! is_port_open $local_port; do
+    while ! is_port_open "$local_port"; do
         echo "Waiting for port $local_port to become available..."
         sleep 1
     done
 
     echo -e "${bold}Tunnel ready${normal}: You can now access RDS $rds_identifier on ${underline}${bold}localhost:${local_port}${normal}"
-    echo "Press enter to exit"; read
+    echo "Press enter to exit";
+    # shellcheck disable=SC2162
+    read
 
     # User session has ended, now kill the SSM port forwarding session
-    SSM_PID="$! $(pgrep -P $!)"
-    kill $SSM_PID
+    mapfile -t SSM_PIDS < <(echo "$SSM_PID"; pgrep -P "$SSM_PID")
+    kill "${SSM_PIDS[@]}"
+    unset SSM_PID SSM_PIDS
     echo "SSM port forwarding session terminated."
     show_menu
 }
@@ -588,12 +520,10 @@ restart_ecs_service() {
     declare -A service_map
     service_options=()
     for cluster_arn in $clusters; do
-        #cluster_name=$(echo "$cluster_arn" | awk -F'/' '{print $2}')
         cluster_name=$(awk -F'/' '{print $2}' <<< "$cluster_arn")
         echo "Processing cluster: $cluster_name"
         services=$(aws ecs list-services --cluster "$cluster_arn" --query 'serviceArns' --output text)
         for service_arn in $services; do
-            #service_name=$(echo "$service_arn" | awk -F'/' '{print $NF}')
             service_name=$(awk -F'/' '{print $NF}' <<< "$service_arn")
             option="$cluster_name/$service_name"
             service_options+=("$option")
@@ -614,12 +544,12 @@ restart_ecs_service() {
             service_arn=${service_map["$option"]}
             account_id=$(awk -F':' '{print $5}' <<< "$service_arn")
             cluster_arn="arn:aws:ecs:$AWS_DEFAULT_REGION:$account_id:cluster/$option"
-            cluster_arn="$(dirname $cluster_arn)"
+            cluster_arn="$(dirname "$cluster_arn")"
             service_name=$(awk -F'/' '{print $NF}' <<< "$service_arn")
             echo "Restarting service $service_name in cluster $cluster_arn"
             aws ecs update-service --cluster "$cluster_arn" --service "$service_name" --force-new-deployment > /dev/null
 
-            printf "Do you want to wait for the service to stabilize? ${bold}(y/n)${normal}"
+            printf "Do you want to wait for the service to stabilize? %s(y/n)%s" "$bold" "$normal"
             read -r answer
 
             if [[ $answer = [Nn]* ]]; then
