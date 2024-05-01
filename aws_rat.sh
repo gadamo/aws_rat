@@ -154,5 +154,17 @@ fi
 # Execute the checks
 check_prerequisites && check_aws_credentials || exit 1
 
+# Get the path to the current script, resolving possible symlinks
+script_path=$(dirname "$0")
+
+# Convert to absolute path if necessary
+case "$script_path" in
+    /*)
+        ;;
+    *)
+        script_path=$(pwd)/$script_path
+        ;;
+esac
+
 # Execute the main script with the found Bash
-"$LATEST_BASH" aws_resource_access_tool.sh "$@"
+"$LATEST_BASH" "${script_path}/aws_resource_access_tool.sh" "$@"
