@@ -480,9 +480,21 @@ setup_port_forwarding_rds() {
     echo "You selected instance: $GLOBAL_SELECTED_INSTANCE"
     target_instance=$GLOBAL_SELECTED_INSTANCE
 
-    local_port=$(get_available_port)
+    echo -n "Enter local port to forward to (leave blank for random available port): "
+    read -r user_port
+    if [[ -n "$user_port" ]]; then
+        local_port=$user_port
+        if is_port_open "$local_port"; then
+            echo "Port $local_port is already in use. Exiting."
+            show_menu
+            return
+        fi
+    else
+        local_port=$(get_available_port)
+        echo "Using random available port: $local_port"
+    fi
 
-    echo "Setting up port forwarding to RDS $rds_identifier at $rds_endpoint:$rds_port via EC2 instance $ec2_instance_id"
+    echo "Setting up port forwarding to RDS $rds_identifier at $rds_endpoint:$rds_port via EC2 instance $target_instance"
     aws ssm start-session --target "$target_instance" --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"portNumber":["'"${rds_port}"'"],"localPortNumber":["'"$local_port"'"],"host":["'"${rds_endpoint}"'"]}' &
 
     # Save the background process PID
